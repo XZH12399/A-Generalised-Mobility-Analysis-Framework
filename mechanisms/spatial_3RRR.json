@@ -1,0 +1,18 @@
+{
+  "name": "Triple Parallelogram (Vertical)",
+  "nodes": [
+    {"id": 0, "type": "R", "axis": [0,0,1], "pos": [0,0,0]},
+    {"id": 1, "type": "R", "axis": [0,0,1], "pos": [1,0,0]},
+    {"id": 2, "type": "R", "axis": [0,0,1], "pos": [1,1,0]},
+    {"id": 3, "type": "R", "axis": [1,0,0], "pos": [0,3,0]},
+    {"id": 4, "type": "R", "axis": [1,0,0], "pos": [0,3,1]},
+    {"id": 5, "type": "R", "axis": [1,0,0], "pos": [0,2,1]}
+  ],
+  "links": [
+    [0,1], [1,2], [3,4], [4,5],
+    [2,5], [0,3]
+  ],
+  "settings": {
+    "manual_path": [3, 0, 1, 2, 5]
+  }
+}
