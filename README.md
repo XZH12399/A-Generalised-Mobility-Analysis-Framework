@@ -108,9 +108,8 @@ python main_test.py
     [0, 1, 2]                 // 这些节点之间视为刚性连接，无相对运动
   ],
   "settings": {
-    "manual_path": [0, 1, 2], // (可选) 指定一条从基座到末端的路径链，用于末端运动分析
-    "base_node": 0,           // 基座节点 ID
-    "ee_node": 2              // 末端节点 ID
+    "base_link": "0_1",
+    "ee_link": "4_5"
   }
 }
 ```
