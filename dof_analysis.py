@@ -16,6 +16,7 @@ def _lie_bracket(twist1, twist2):
 
 
 def _build_extended_path_nx(G, raw_path):
+    """旧版路径扩展辅助函数（保留以兼容手动路径）"""
     if not raw_path: return None
     start, end = raw_path[0], raw_path[-1]
     path_set = set(raw_path)
@@ -35,6 +36,96 @@ def _build_extended_path_nx(G, raw_path):
     return [ghost_prev] + raw_path + [ghost_next]
 
 
+def construct_smart_path(topology_edges, base_link_str, ee_link_str):
+    """
+    智能路径构建：支持 "杆件-杆件"、"杆件-节点"、"节点-节点" 的任意组合。
+    如果输入是杆件 "u_v"，会自动切断 u-v 边以确定延伸方向。
+
+    Returns:
+        full_path: list (包含 ghost nodes)
+        start_node: int
+        end_node: int
+    """
+    G_full = nx.Graph()
+    G_full.add_edges_from(topology_edges)
+
+    # --- 内部辅助函数：解析节点或杆件选项 ---
+    def parse_anchor_opts(anchor_str):
+        if anchor_str is None:
+            return [], None
+
+        s = str(anchor_str)
+        if '_' in s:
+            # 如果是杆件 "A_B" -> 需要把字符串转为 int ID
+            u_str, v_str = s.split('_')
+            try:
+                u, v = int(u_str), int(v_str)
+                # 选项1: 从 A 出发 (Ghost是 B)
+                # 选项2: 从 B 出发 (Ghost是 A)
+                return [
+                    {'node': u, 'ghost': v},
+                    {'node': v, 'ghost': u}
+                ], (u, v)
+            except ValueError:
+                return [], None
+        else:
+            # 如果是单节点 "A"
+            try:
+                node_id = int(s)
+                # 选项: 从 A 出发 (Ghost是 None，留给后续自动处理或留空)
+                return [{'node': node_id, 'ghost': None}], None
+            except ValueError:
+                return [], None
+
+    # 1. 解析基座和末端
+    base_opts, base_edge_to_cut = parse_anchor_opts(base_link_str)
+    ee_opts, ee_edge_to_cut = parse_anchor_opts(ee_link_str)
+
+    if not base_opts or not ee_opts:
+        return None, None, None
+
+    # 2. 构建切割图 (G_cut)
+    # 如果定义了杆件，必须切断杆件内部连接，强迫路径向外寻找
+    G_cut = G_full.copy()
+
+    if base_edge_to_cut and G_cut.has_edge(*base_edge_to_cut):
+        G_cut.remove_edge(*base_edge_to_cut)
+
+    if ee_edge_to_cut and G_cut.has_edge(*ee_edge_to_cut):
+        G_cut.remove_edge(*ee_edge_to_cut)
+
+    # 3. 组合寻找最短路径
+    for b_opt in base_opts:
+        for e_opt in ee_opts:
+            try:
+                # 在切断了内部连接的图中寻找路径
+                path = nx.shortest_path(G_cut, source=b_opt['node'], target=e_opt['node'])
+
+                # 路径构建成功！
+                # 组装完整路径: [BaseGhost, Start, ..., End, EEGhost]
+                full_path = [b_opt['ghost']] + path + [e_opt['ghost']]
+
+                # 如果 Ghost 为 None (说明输入的是节点)，这里尝试自动补全一下 Ghost
+                # 以兼容旧的逻辑，或者保持 None
+                # 这里为了稳健性，若为 None，尝试用原来的 _build_extended_path_nx 的逻辑补一个
+                if full_path[0] is None:
+                    # 尝试找一个非 path 的邻居
+                    nbrs = list(G_cut.neighbors(path[0]))
+                    valid = [n for n in nbrs if n not in path]
+                    if valid: full_path[0] = valid[0]
+
+                if full_path[-1] is None:
+                    nbrs = list(G_cut.neighbors(path[-1]))
+                    valid = [n for n in nbrs if n not in path]
+                    if valid: full_path[-1] = valid[0]
+
+                return full_path, path[0], path[-1]
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                continue
+
+    return None, None, None
+
+
 def augment_k_matrix_to_remove_modes(K, bad_modes, weight=10.0):
     if not bad_modes: return K
     rows_to_add = []
@@ -45,36 +136,20 @@ def augment_k_matrix_to_remove_modes(K, bad_modes, weight=10.0):
 
 
 def detect_instantaneous_modes(K_func_builder, candidate_modes, loops, edge_to_col, node_screw_map):
-    """
-    使用 [李括号漂移-投影相容性测试] 剔除瞬时自由度 (IDOF)。
-    原理：检查二阶几何漂移 (Drift) 是否落在当前雅可比矩阵 (K) 的列空间内。
-    """
-    # 步长：足够小以满足李代数线性近似
     dt = 1e-3
     idof_vectors = []
     print(f"   🕵️  正在进行多闭环漂移投影检测 (Multi-loop Drift Projection, Step={dt})...")
 
-    # --- 0. 预计算当前构型的“支付能力” (K矩阵) ---
-    # 优化：K矩阵只取决于当前几何位置，与尝试哪个 mode 无关，所以提取到循环外
     K_curr = K_func_builder(node_screw_map)
-
-    # 计算伪逆 (Pseudo-inverse)，用于投影
-    # rcond=1e-3 用于忽略极小的数值噪声，视情况可微调
     K_pinv = np.linalg.pinv(K_curr, rcond=1e-3)
 
     for i, mode_vec in enumerate(candidate_modes):
-        # 归一化模式向量 (单位速度)
         mode_vec = mode_vec / (np.linalg.norm(mode_vec) + 1e-9)
-
-        # 存储每个闭环的漂移向量，最后拼接
         loop_drifts_list = []
 
-        # --- A. 逐个闭环计算漂移向量 (The "Bill") ---
         for loop in loops:
             loop_drift = np.zeros(6)
             L = len(loop)
-
-            # 用于累积当前环内的几何位置 (杆长/力臂)
             current_twist_sum = np.zeros(6)
 
             for j in range(L):
@@ -82,56 +157,31 @@ def detect_instantaneous_modes(K_func_builder, candidate_modes, loops, edge_to_c
                 prev_node = loop[(j - 1 + L) % L]
                 next_node = loop[(j + 1) % L]
 
-                # 1. 提取关节角速度 (从 mode_vec 映射到 edge)
                 val_next = mode_vec[edge_to_col.get((curr_node, next_node), -1)] if (curr_node,
                                                                                      next_node) in edge_to_col else 0.0
                 val_prev = mode_vec[edge_to_col.get((curr_node, prev_node), -1)] if (curr_node,
                                                                                      prev_node) in edge_to_col else 0.0
-
-                # 关节相对速度 * 时间步长 = 关节转角增量
-                # [注意] 必须乘 dt，否则 current_twist_sum 会过大导致线性近似失效
                 d_theta = (val_next - val_prev) * dt
 
-                # 2. 获取当前节点的螺旋 (无需 copy，直接读原始数据)
                 screw = node_screw_map[curr_node]
-
-                # 3. 计算李括号 (二阶漂移项)
-                # 物理含义: 当前累积的杆长(twist_sum) x 当前转动(screw) -> 产生的额外离心位移
                 drift_contribution = _lie_bracket(current_twist_sum, screw)
-
-                # 累加漂移: 漂移速率 * 转角 = 实际漂移量
                 loop_drift += drift_contribution * d_theta
-
-                # 4. 更新累积位置 (一阶切线项)
                 current_twist_sum += screw * d_theta
 
             loop_drifts_list.append(loop_drift)
 
-        # --- B. 拼接与投影 (The "Payment") ---
-        # 将所有环的漂移拼接成 (6 * NumLoops) 维向量
         full_drift_vector = np.concatenate(loop_drifts_list)
-
-        # 投影测试: 检查 K 矩阵能否产生这个 Drift
-        # solution = K_pinv @ drift (尝试凑出账单)
         solution = K_pinv @ full_drift_vector
-
-        # projected = K @ solution (实际能凑出的部分)
         projected_drift = K_curr @ solution
-
-        # --- C. 判据 (The "Verdict") ---
-        # 残差 = 想要的 - 实际能给的
         residual_vec = full_drift_vector - projected_drift
-
         residual_norm = np.linalg.norm(residual_vec)
         drift_norm = np.linalg.norm(full_drift_vector)
 
-        # 防止除零
         if drift_norm < 1e-12:
             ratio = 0.0
         else:
             ratio = residual_norm / drift_norm
 
-        # 阈值判定：如果超过 10% 的漂移无法被补偿，认为是死锁
         if ratio > 0.1:
             print(f"      -> Mode {i + 1}: Drift无法补偿 (Ratio={ratio:.2f}) (⚠️ IDOF)")
             idof_vectors.append(mode_vec)
@@ -148,16 +198,45 @@ def detect_instantaneous_modes(K_func_builder, candidate_modes, loops, edge_to_c
 def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
                             rigid_body_sets=None,
                             base_node=None, ee_node=None,
+                            base_link=None, ee_link=None,
                             manual_extended_path=None,
                             dof_threshold=1e-4):
-    # --- 0. 拓扑 ---
-    if manual_extended_path is not None:
-        if base_node is None: base_node = manual_extended_path[1]
-        if ee_node is None: ee_node = manual_extended_path[-2]
-    if base_node is None or ee_node is None: return {"error": "Args missing"}
+    """
+    Args:
+        base_link (str): 格式 "u_v" (杆件) 或 "u" (节点)
+        ee_link (str): 格式 "u_v" (杆件) 或 "u" (节点)
+    """
 
+    # --- 0. 拓扑与路径构建 ---
     G_raw = nx.Graph()
     for u, v in topology_edges: G_raw.add_edge(u, v)
+
+    # 优先级 1: 用户指定了 manual_path
+    extended_path = manual_extended_path
+
+    # 优先级 2: 用户指定了 Link 字符串 (智能路径)
+    if extended_path is None and base_link and ee_link:
+        print(f"🛤️  正在使用智能路径分析: Base({base_link}) -> EE({ee_link})")
+        smart_path, s_node, e_node = construct_smart_path(topology_edges, base_link, ee_link)
+        if smart_path:
+            extended_path = smart_path
+            base_node = s_node
+            ee_node = e_node
+            print(f"    -> 自动规划路径: {extended_path}")
+        else:
+            print("    ⚠️  警告: 无法构建智能路径，回退到默认逻辑。")
+
+    # 优先级 3: 仅有 base_node / ee_node (回退到旧逻辑)
+    if extended_path is None:
+        if base_node is not None and ee_node is not None:
+            # 旧逻辑补丁
+            pass
+        else:
+            return {"error": "Args missing: Need (base_link, ee_link) OR (base_node, ee_node) OR manual_path"}
+
+    # 再次确认 base/ee (用于后续 loop 检测等无关路径的逻辑)
+    if base_node is None and extended_path: base_node = extended_path[1] if len(extended_path) > 1 else extended_path[0]
+    if ee_node is None and extended_path: ee_node = extended_path[-2] if len(extended_path) > 1 else extended_path[-1]
 
     try:
         loops = nx.cycle_basis(G_raw)
@@ -200,7 +279,6 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
             L = len(loop_nodes)
             row_start = l_idx * 6
 
-            # 检查用户定义的刚体
             current_loop_set = set(loop_nodes)
             is_rigid = False
             for rb_set in rigid_body_sets:
@@ -258,14 +336,11 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
     Vh_final_sorted = np.flip(Vh_f, axis=0)
     evecs = Vh_final_sorted.T
 
-    # --- DOF 判定逻辑 (Max Gap Strategy) ---
+    # --- DOF 判定 ---
     valid_evals = final_spectrum[gauge_n:]
     physical_dof = 0
     max_gap = 0.0
     potential_dof_idx = 0
-
-    # [修改建议] 将接受阈值从 0.1 收紧到 1e-4 或 1e-5
-    # 只有当奇异值真的非常接近 0 时，我们才关心它后面的 Gap
     STRICT_DOF_THRESHOLD = dof_threshold
 
     if len(valid_evals) > 0:
@@ -273,8 +348,6 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
             v_curr = valid_evals[i] if valid_evals[i] > 1e-12 else 1e-12
             v_next = valid_evals[i + 1]
             gap = v_next / v_curr
-
-            # 修改这里的判断条件：v_curr < STRICT_DOF_THRESHOLD
             if v_curr < STRICT_DOF_THRESHOLD and gap > 10.0:
                 if gap > max_gap:
                     max_gap = gap
@@ -283,33 +356,23 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
     if max_gap > 10.0:
         physical_dof = potential_dof_idx
     else:
-        # 兜底逻辑也使用严格阈值
         physical_dof = np.sum(valid_evals < STRICT_DOF_THRESHOLD)
 
-    # ========================================================
-    # [新增] 提取详细的关节速度分布 (Debugging Info)
-    # ========================================================
+    # --- 详细速度提取 ---
     dof_details = []
     if physical_dof > 0:
-        # 提取对应物理自由度的基向量 (跳过 gauge_n)
         indices = np.arange(gauge_n, gauge_n + int(physical_dof))
         if indices.max() < evecs.shape[1]:
             dof_basis = evecs[:, indices]
-
-            # 遍历每一个找到的自由度模式
             for k in range(dof_basis.shape[1]):
                 mode_vec = dof_basis[:, k]
-
-                # 记录该模式下所有边的速度
                 joint_vels = []
                 for edge_idx, vel in enumerate(mode_vec):
                     u, v = directed_edges[edge_idx]
-                    # 只记录绝对值大于极小值的，或者全部记录方便排查
                     joint_vels.append({
                         "edge": (u, v),
                         "vel": float(vel)
                     })
-
                 dof_details.append({
                     "mode_id": k + 1,
                     "velocities": joint_vels
@@ -327,9 +390,9 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
     ee_basis_normalized = []
 
     if null_space_basis is not None:
-        if manual_extended_path:
-            extended_path = manual_extended_path
-        else:
+        # 如果前面 construct_smart_path 成功，extended_path 已经有了
+        # 如果没有，尝试旧逻辑
+        if extended_path is None:
             if nx.has_path(G_raw, base_node, ee_node):
                 raw = nx.shortest_path(G_raw, base_node, ee_node)
                 extended_path = _build_extended_path_nx(G_raw, raw)
@@ -340,11 +403,15 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
         if extended_path and len(extended_path) >= 3:
             for i in range(1, len(extended_path) - 1):
                 curr, next_n, prev_n = extended_path[i], extended_path[i + 1], extended_path[i - 1]
-                screw = node_screw_map[curr]
-                if next_n is not None and (curr, next_n) in edge_to_col:
-                    J_path[:, edge_to_col[(curr, next_n)]] += screw
-                if prev_n is not None and (curr, prev_n) in edge_to_col:
-                    J_path[:, edge_to_col[(curr, prev_n)]] -= screw
+                # 这里 prev_n 可能是 None (Ghost)，如果是 None，需要跳过对应的 J 填充吗？
+                # 实际上如果 ghost 是 None，意味着它没有前驱，这通常只发生在纯开链的起点头部
+                # 但在这里我们只关注 path 的中间部分
+                if curr in node_screw_map:
+                    screw = node_screw_map[curr]
+                    if next_n is not None and (curr, next_n) in edge_to_col:
+                        J_path[:, edge_to_col[(curr, next_n)]] += screw
+                    if prev_n is not None and (curr, prev_n) in edge_to_col:
+                        J_path[:, edge_to_col[(curr, prev_n)]] -= screw
 
         T_raw = J_path @ null_space_basis
         try:
@@ -378,5 +445,5 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
         "ee_twist_basis": ee_basis_normalized,
         "spectrum": final_spectrum.tolist(),
         "gauge_dof": int(gauge_n),
-        "dof_details": dof_details  # 返回详细速度信息
+        "dof_details": dof_details
     }

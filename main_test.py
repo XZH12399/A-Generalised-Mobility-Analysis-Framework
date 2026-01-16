@@ -9,13 +9,19 @@ JSON_FILE_NAME = input("请输入文件名 (默认 Tian_1T1R): ") or "Tian_1T1R"
 def run_test():
     print(f"📂 正在加载机构配置: {JSON_FILE_NAME}.json ...")
     try:
-        screws, links, base, ee, path, nodes_info, rigid_bodies = load_mechanism_from_json(JSON_FILE_NAME)
+        # [修改] 接收新增的 base_link, ee_link 返回值
+        screws, links, base, ee, path, nodes_info, rigid_bodies, base_link, ee_link = load_mechanism_from_json(JSON_FILE_NAME)
         print("✅ 数据加载成功！")
     except Exception as e:
         print(f"❌ 加载失败: {e}")
         return
 
-    print(f"🚀 开始分析... (Base: {base} -> EE: {ee})")
+    # 打印提示信息
+    if base_link and ee_link:
+        print(f"🚀 开始分析... (Smart Path: Link {base_link} -> Link {ee_link})")
+    else:
+        print(f"🚀 开始分析... (Base Node: {base} -> EE Node: {ee})")
+
     result = analyze_mobility_anchor(
         node_screw_map=screws,
         topology_edges=links,
@@ -23,6 +29,8 @@ def run_test():
         rigid_body_sets=rigid_bodies,
         base_node=base,
         ee_node=ee,
+        base_link=base_link, # [新增]
+        ee_link=ee_link,     # [新增]
         manual_extended_path=path
     )
     print_results(result)
@@ -110,18 +118,15 @@ def print_results(result):
                 print(f"   {'Link Edge (From->To)':<25} | {'Velocity':<12} | {'Bar Graph'}")
                 print("-" * 65)
 
-                # 排序：按速度绝对值从大到小
                 sorted_vels = sorted(detail['velocities'], key=lambda x: abs(x['vel']), reverse=True)
 
                 has_motion = False
                 for item in sorted_vels:
                     edge = item['edge']
                     v = item['vel']
-
-                    # 只显示有明显运动的关节，减少噪声
                     if abs(v) > 1e-4:
                         has_motion = True
-                        bar_len = int(abs(v) * 20)  # 简易进度条
+                        bar_len = int(abs(v) * 20)
                         bar = "█" * bar_len
                         edge_str = f"{edge[0]} -> {edge[1]}"
                         print(f"   {edge_str:<25} | {v:>.4f}      | {bar}")

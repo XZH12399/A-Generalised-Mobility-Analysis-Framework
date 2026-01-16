@@ -86,9 +86,6 @@ def load_mechanism_from_json(json_filename):
             'screw': screw
         }
 
-    # for key, value in nodes_info.items():
-    #     print(key, value['screw'])
-
     links = [tuple(link) for link in data['links']]
     raw_rigid_bodies = data.get('rigid_bodies', [])
     rigid_body_sets = [set(rb) for rb in raw_rigid_bodies]
@@ -98,11 +95,16 @@ def load_mechanism_from_json(json_filename):
     base_node = settings.get('base_node', None)
     ee_node = settings.get('ee_node', None)
 
-    if manual_path is not None and len(manual_path) >= 3:
-        if base_node is None: base_node = manual_path[1]
-        if ee_node is None: ee_node = manual_path[-2]
+    # [新增] 解析 Link 定义
+    base_link = settings.get('base_link', None)
+    ee_link = settings.get('ee_link', None)
 
-    if base_node is None: base_node = 0
-    if ee_node is None: ee_node = len(data['nodes']) - 1
+    # 兼容性处理：如果只给了 link 没给 node，也不需要在这里强制报错，
+    # 留给 dof_analysis.py 里的智能路径构建去处理。
 
-    return node_screw_map, links, base_node, ee_node, manual_path, nodes_info, rigid_body_sets
+    if base_node is None and manual_path is None and base_link is None:
+        base_node = 0
+    if ee_node is None and manual_path is None and ee_link is None:
+        ee_node = len(data['nodes']) - 1
+
+    return node_screw_map, links, base_node, ee_node, manual_path, nodes_info, rigid_body_sets, base_link, ee_link
