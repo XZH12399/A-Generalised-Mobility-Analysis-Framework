@@ -69,7 +69,7 @@ def load_mechanism_from_json(json_filename):
             screw[3:] = v / L_char
 
         elif j_type == 'P':
-            move_dir = vec_pos / (pos_norm + 1e-9)
+            move_dir = vec_axis / (axis_norm + 1e-9)
 
             # [核心修改] P副：保持原样 (模长为1)
             # 这样 R 副模长 ~1.4, P 副模长 = 1.0, 量级完美平衡
