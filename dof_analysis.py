@@ -213,6 +213,15 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
 
     # 优先级 1: 用户指定了 manual_path
     extended_path = manual_extended_path
+    if extended_path is not None:
+        if len(extended_path) >= 4:
+            print(
+                f"🛤️  使用手动扩展路径: {extended_path} "
+                f"(Base Link {extended_path[0]}-{extended_path[1]} -> "
+                f"EE Link {extended_path[-2]}-{extended_path[-1]})"
+            )
+        else:
+            print(f"🛤️  使用手动路径: {extended_path}")
 
     # 优先级 2: 用户指定了 Link 字符串 (智能路径)
     if extended_path is None and base_link and ee_link:
@@ -423,10 +432,13 @@ def analyze_mobility_anchor(node_screw_map, topology_edges, nodes_info,
                 ee_basis_normalized = basis_cols.T.tolist()
                 if ee_rank == 1:
                     w = basis_cols[:3, 0]
-                    if np.linalg.norm(w) < 1e-5:
+                    v = basis_cols[3:, 0]
+                    w_norm = np.linalg.norm(w)
+                    v_norm = np.linalg.norm(v)
+                    if w_norm < max(1e-5, 1e-4 * max(v_norm, 1e-12)):
                         motion_desc = "1P (Pure Translation)"
                     else:
-                        pitch = np.dot(w, basis_cols[3:, 0]) / (np.linalg.norm(w) ** 2)
+                        pitch = np.dot(w, v) / (w_norm ** 2)
                         if abs(pitch) < 1e-2:
                             motion_desc = "1R (Pure Rotation)"
                         else:

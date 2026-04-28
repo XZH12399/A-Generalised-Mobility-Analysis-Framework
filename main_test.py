@@ -17,7 +17,12 @@ def run_test():
         return
 
     # 打印提示信息
-    if base_link and ee_link:
+    if path:
+        if len(path) >= 4:
+            print(f"🚀 开始分析... (Manual Path: {path}; Base Link {path[0]}-{path[1]} -> EE Link {path[-2]}-{path[-1]})")
+        else:
+            print(f"🚀 开始分析... (Manual Path: {path})")
+    elif base_link and ee_link:
         print(f"🚀 开始分析... (Smart Path: Link {base_link} -> Link {ee_link})")
     else:
         print(f"🚀 开始分析... (Base Node: {base} -> EE Node: {ee})")
